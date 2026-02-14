@@ -12,6 +12,13 @@ import numpy as np
 # Use non-interactive backend for server/terminal environments
 import matplotlib
 matplotlib.use('Agg')
+import psutil
+from jinja2 import Template
+try:
+    import GPUtil
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
 
 def parse_int_input(val: str) -> int:
     """Parses string inputs with K/M suffixes into integers."""
@@ -44,6 +51,28 @@ class OllamaProxy:
             
         self._init_db()
 
+    def _get_hardware_info(self) -> Dict[str, Any]:
+        """Captures current CPU, RAM and GPU metrics."""
+        # Get percentages (interval=None for instant reading)
+        info = {
+            "cpu_percent": psutil.cpu_percent(),
+            "ram_percent": psutil.virtual_memory().percent,
+            "gpu_load": 0.0,
+            "gpu_temp": 0.0,
+            "vram_used": 0.0
+        }
+        if GPU_AVAILABLE:
+            try:
+                gpus = GPUtil.getGPUs()
+                if gpus:
+                    gpu = gpus[0] # Monitor primary GPU
+                    info["gpu_load"] = gpu.load * 100
+                    info["gpu_temp"] = gpu.temperature
+                    info["vram_used"] = gpu.memoryUsed
+            except Exception:
+                pass
+        return info
+
     def _init_db(self):
         """Creates the logs table if it doesn't exist."""
         with sqlite3.connect(self.db_path) as conn:
@@ -61,17 +90,32 @@ class OllamaProxy:
                     request_json TEXT,
                     response_json TEXT,
                     test_type TEXT DEFAULT 'standard',
-                    accuracy_score REAL DEFAULT 1.0
+                    accuracy_score REAL DEFAULT 1.0,
+                    cpu_percent REAL,
+                    ram_percent REAL,
+                    gpu_load REAL,
+                    gpu_temp REAL,
+                    vram_used_mb REAL
                 )
             ''')
             # Migration check
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(ollama_logs)")
             columns = [column[1] for column in cursor.fetchall()]
-            if "test_type" not in columns:
-                conn.execute("ALTER TABLE ollama_logs ADD COLUMN test_type TEXT DEFAULT 'standard'")
-            if "accuracy_score" not in columns:
-                conn.execute("ALTER TABLE ollama_logs ADD COLUMN accuracy_score REAL DEFAULT 1.0")
+            
+            new_columns = {
+                "test_type": "TEXT DEFAULT 'standard'",
+                "accuracy_score": "REAL DEFAULT 1.0",
+                "cpu_percent": "REAL",
+                "ram_percent": "REAL",
+                "gpu_load": "REAL",
+                "gpu_temp": "REAL",
+                "vram_used_mb": "REAL"
+            }
+            
+            for col, col_def in new_columns.items():
+                if col not in columns:
+                    conn.execute(f"ALTER TABLE ollama_logs ADD COLUMN {col} {col_def}")
 
     def query(self, model_id: str, prompt: str, log_to_db: bool = True, test_type: str = "standard"):
         # Latency: Total Round Trip Time
@@ -110,9 +154,10 @@ class OllamaProxy:
 
         # Log to DB only if requested
         if log_to_db:
+            hw = self._get_hardware_info()
             self._log_to_db(
                 model_id, prompt, response['response'] if isinstance(response, dict) else response.response, 
-                latency, in_tokens, out_tokens, tps, req_json, resp_json, test_type=test_type
+                latency, in_tokens, out_tokens, tps, req_json, resp_json, test_type=test_type, hw_info=hw
             )
 
         resp_text = response['response'] if isinstance(response, dict) else response.response
@@ -208,6 +253,55 @@ class OllamaProxy:
         
         return results
 
+    def run_concurrency_test(self, model_id: str, users: int = 5, prompt: str = "Explain the importance of local LLMs."):
+        """Simulates parallel users making requests to measure throughput degradation."""
+        print(f"\n🚀 CONCURRENCY LOAD TEST - Model: {model_id} | Users: {users}")
+        
+        from concurrent.futures import ThreadPoolExecutor
+        
+        start_time = time.perf_counter()
+        results = []
+        
+        with ThreadPoolExecutor(max_workers=users) as executor:
+            # Launch all requests in parallel
+            futures = [executor.submit(self.query, model_id, prompt, log_to_db=True, test_type=f"concurrency_{users}") for _ in range(users)]
+            
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    print(f"❌ Worker Error: {e}")
+        
+        total_duration = time.perf_counter() - start_time
+        
+        # Aggregate metrics
+        total_tokens = 0
+        latencies = []
+        for r in results:
+            # Parse tokens from string "in/out"
+            try:
+                _, out = r['metrics']['tokens'].split('/')
+                total_tokens += int(out)
+                latencies.append(float(r['metrics']['latency'].replace('s', '')))
+            except:
+                pass
+        
+        avg_latency = sum(latencies) / len(latencies) if latencies else 0
+        overall_tps = total_tokens / total_duration if total_duration > 0 else 0
+        
+        print("\n--- CONCURRENCY RESULTS ---")
+        print(f"Total Requests: {len(results)}")
+        print(f"Total Time: {total_duration:.2f}s")
+        print(f"Average Latency: {avg_latency:.2f}s")
+        print(f"Aggregate Throughput: {overall_tps:.2f} tokens/s")
+        
+        return {
+            "users": users,
+            "duration": total_duration,
+            "avg_latency": avg_latency,
+            "overall_tps": overall_tps
+        }
+
     def run_context_stress_test(self, model_id: str, steps: int = 5, increment_tokens: int = 512, num_ctx: int = 4096):
         """Needle in a Haystack: Tests memory retention as context grows."""
         print(f"\n🧠 CONTEXT STRESS TEST - Model: {model_id} (num_ctx: {num_ctx})")
@@ -271,8 +365,9 @@ class OllamaProxy:
             print(f"   - Results: {tps:.2f} tokens/s, Accuracy: {'✅ OK' if accuracy == 1.0 else '❌ FAILED'}")
             
             # Log this specific step to DB
+            hw = self._get_hardware_info()
             self._log_to_db(model_id, filler, content, latency, in_tokens, out_tokens, tps, 
-                            json.dumps(messages), str(response), test_type="stress", accuracy_score=accuracy)
+                            json.dumps(messages), str(response), test_type="stress", accuracy_score=accuracy, hw_info=hw)
             
             results.append({
                 "step": i,
@@ -326,13 +421,86 @@ class OllamaProxy:
         print(f"\n✅ Visual report saved to: {save_path}")
         plt.close()
 
-    def _log_to_db(self, model, prompt, resp, latency, in_t, out_t, tps, req_json=None, resp_json=None, test_type="standard", accuracy_score=1.0):
+    def export_interactive_dashboard(self, filename: str = "performance_dashboard.html"):
+        """Generates a premium interactive HTML dashboard with Plotly charts."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM ollama_logs ORDER BY timestamp DESC LIMIT 100")
+            logs = [dict(row) for row in cursor.fetchall()]
+
+        if not logs:
+            print("⚠️ No logs found to generate dashboard.")
+            return
+
+        # Prepare summary stats
+        total_models = len(set(log['model_name'] for log in logs))
+        avg_tps = sum(log['tokens_per_sec'] for log in logs) / len(logs)
+        best_tps = max(log['tokens_per_sec'] for log in logs)
+        
+        # Prepare Chart 1: Avg TPS per Model
+        model_tps = {}
+        for log in logs:
+            m = log['model_name']
+            if m not in model_tps: model_tps[m] = []
+            model_tps[m].append(log['tokens_per_sec'])
+        
+        tps_chart_data = {
+            "labels": list(model_tps.keys()),
+            "values": [sum(v)/len(v) for v in model_tps.values()]
+        }
+
+        # Prepare Chart 2: Hardware Telemetry (Timeline)
+        # Sort logs by timestamp for timeline
+        timed_logs = sorted(logs, key=lambda x: x['timestamp'])[-20:]
+        hw_chart_data = {
+            "labels": [l['timestamp'][11:19] for l in timed_logs],
+            "cpu": [l['cpu_percent'] if l['cpu_percent'] else 0 for l in timed_logs],
+            "vram": [l['vram_used_mb']/100 if l['vram_used_mb'] else 0 for l in timed_logs] # Scaled for visibility
+        }
+
+        # Render Template
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        template_path = os.path.join(base_dir, "dashboard_template.html")
+        
+        try:
+            with open(template_path, "r") as f:
+                template = Template(f.read())
+        except FileNotFoundError:
+            print("❌ Dashboard template not found.")
+            return
+
+        html_out = template.render(
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            total_models=total_models,
+            avg_tps=f"{avg_tps:.2f}",
+            best_tps=f"{best_tps:.2f}",
+            total_logs=len(logs),
+            logs=logs,
+            tps_chart_data=tps_chart_data,
+            hw_chart_data=hw_chart_data
+        )
+
+        save_path = os.path.join(base_dir, filename)
+        with open(save_path, "w") as f:
+            f.write(html_out)
+        
+        print(f"\n✨ Interactive dashboard generated: {save_path}")
+        return save_path
+
+    def _log_to_db(self, model, prompt, resp, latency, in_t, out_t, tps, req_json=None, resp_json=None, test_type="standard", accuracy_score=1.0, hw_info=None):
+        if hw_info is None:
+            hw_info = {"cpu_percent": None, "ram_percent": None, "gpu_load": None, "gpu_temp": None, "vram_used": None}
+            
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('''
                 INSERT INTO ollama_logs 
-                (timestamp, model_name, prompt, full_response, latency_seconds, input_tokens, output_tokens, tokens_per_sec, request_json, response_json, test_type, accuracy_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (datetime.now().isoformat(), model, prompt, resp, latency, in_t, out_t, tps, req_json, resp_json, test_type, accuracy_score))
+                (timestamp, model_name, prompt, full_response, latency_seconds, input_tokens, output_tokens, tokens_per_sec, 
+                 request_json, response_json, test_type, accuracy_score, cpu_percent, ram_percent, gpu_load, gpu_temp, vram_used_mb)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (datetime.now().isoformat(), model, prompt, resp, latency, in_t, out_t, tps, 
+                  req_json, resp_json, test_type, accuracy_score, 
+                  hw_info["cpu_percent"], hw_info["ram_percent"], hw_info["gpu_load"], 
+                  hw_info["gpu_temp"], hw_info["vram_used"]))
 
 if __name__ == "__main__":
     PROXY = OllamaProxy()
@@ -341,7 +509,8 @@ if __name__ == "__main__":
     print("\n--- OLLAMA PERFORMANCE MONITOR ---")
     print("1. Standard Benchmark (Speed / Latency)")
     print("2. Context Stress Test (Needle in a Haystack)")
-    mode = input("Select mode (1/2, default: 1): ") or "1"
+    print("3. Concurrency Load Test (Parallel Users)")
+    mode = input("Select mode (1/2/3, default: 1): ") or "1"
 
     # 2. Show local models
     print("\nAvailable Local Models (Ollama):")
@@ -373,10 +542,12 @@ if __name__ == "__main__":
             for mod, metrics in results.items():
                 print(f"Model: {mod} -> {metrics}")
             
-            ans = input("\n📊 Would you like to generate a visual performance report? (y/n): ").lower()
-            if ans == 'y':
+            ans = input("\n📊 Would you like to generate a visual performance report? (PNG: p, Interactive HTML: h, Both: b, None: n): ").lower()
+            if ans in ['p', 'b']:
                 PROXY.export_performance_charts(results)
-    else:
+            if ans in ['h', 'b']:
+                PROXY.export_interactive_dashboard()
+    elif mode == "2":
         # Stress Test logic
         print("\n--- STRESS TEST CONFIGURATION ---")
         model_name = input(f"Enter model name to test (available: {available}): ")
@@ -404,3 +575,23 @@ if __name__ == "__main__":
         for sr in stress_results:
             status = "✅ OK" if sr["accuracy"] == 1.0 else "❌ FAIL"
             print(f"Step {sr['step']}: Context {sr['context_tokens']} tokens -> {sr['tps']:.2f} tps | {status}")
+    elif mode == "3":
+        # Concurrency Load Test logic
+        print("\n--- CONCURRENCY LOAD TEST ---")
+        model_name = input(f"Enter model name to test (available: {available}): ")
+        # Fuzzy match logic
+        if model_name not in available:
+            match = [m for m in available if model_name in m]
+            if match:
+                model_name = match[0]
+                print(f"Using fuzzy match: {model_name}")
+            else:
+                print("❌ Invalid model.")
+                sys.exit(1)
+        
+        users_input = input("Number of parallel users? (default: 5): ")
+        users = int(users_input) if users_input else 5
+        
+        custom_prompt = input("Custom prompt? (press Enter for default): ") or "Explain the importance of local LLMs."
+        
+        PROXY.run_concurrency_test(model_name, users=users, prompt=custom_prompt)
