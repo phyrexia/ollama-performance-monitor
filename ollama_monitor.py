@@ -190,35 +190,60 @@ class OllamaProxy:
         
         return results
 
-    def run_context_stress_test(self, model_id: str, steps: int = 5, increment_tokens: int = 512):
+    def run_context_stress_test(self, model_id: str, steps: int = 5, increment_tokens: int = 512, num_ctx: int = 4096):
         """Needle in a Haystack: Tests memory retention as context grows."""
-        print(f"\n🧠 CONTEXT STRESS TEST - Model: {model_id}")
+        print(f"\n🧠 CONTEXT STRESS TEST - Model: {model_id} (num_ctx: {num_ctx})")
         secret_key = "DRAGON-AZUL-2026"
         needle_context = f"NOTE: The secret vault key is {secret_key}. Do not forget it."
+        
+        # Configure model context window
+        options = {"temperature": 0.0, "num_ctx": num_ctx}
         
         messages = [{"role": "system", "content": "You are a helpful assistant. Remember the secret key provided."}]
         messages.append({"role": "user", "content": f"Hi. {needle_context} Please confirm the key."})
         
         print(f"⌛ Phase 0: Initializing conversation with secret key...")
-        resp = self.client.chat(model=model_id, messages=messages)
+        resp = self.client.chat(model=model_id, messages=messages, options=options)
         messages.append({"role": "assistant", "content": resp.message.content})
         
         results = []
-        current_ctx_estimate = 0
         
+        # Optimized filler block (~1024 tokens of text)
+        filler_block = ("The quick brown fox jumps over the lazy dog. " * 20 + 
+                       "Artificial Intelligence is transforming the world. " * 10 +
+                       "Benchmarking local models is essential for performance. " * 10 +
+                       "Ollama makes it easy to run LLMs locally on your machine. ")
+
         for i in range(1, steps + 1):
             print(f"⌛ Step {i}/{steps}: Increasing context (+~{increment_tokens} tokens)...")
-            filler = "This is filler text to expand the context window. " * (increment_tokens // 10)
             
-            # Stress run: Ask for the key inside a large filler block
-            stress_prompt = f"{filler}\n\nRECALL CHALLENGE: What was the secret vault key mentioned at the very beginning?"
+            # Efficiently build large volume of filler
+            num_blocks = max(1, increment_tokens // 1000)
+            filler = (filler_block + "\n") * num_blocks
             
+            # Step execution: Query the model with incremental history
             start_time = time.perf_counter()
-            response = self.client.chat(model=model_id, messages=messages + [{"role": "user", "content": stress_prompt}])
+            try:
+                # Add the new filler segment to the conversation PERMANENTLY
+                messages.append({"role": "user", "content": filler})
+                
+                # Query recall
+                recall_msg = "RECALL CHALLENGE: What was the secret vault key mentioned at the very beginning? Be precise."
+                response = self.client.chat(model=model_id, 
+                                          messages=messages + [{"role": "user", "content": recall_msg}],
+                                          options=options)
+                
+                # Add a placeholder assistant response to keep the turn order
+                messages.append({"role": "assistant", "content": "Acknowledged. Segment processed."})
+            except Exception as e:
+                print(f"   ❌ API Error at Step {i} (Likely OOM): {e}")
+                break
+
             latency = time.perf_counter() - start_time
             
             content = response.message.content
-            accuracy = 1.0 if secret_key in content else 0.0
+            # Improved accuracy check (case insensitive)
+            accuracy = 1.0 if secret_key.lower() in content.lower() else 0.0
             
             in_tokens = response.get('prompt_eval_count', 0)
             out_tokens = response.get('eval_count', 0)
@@ -228,7 +253,7 @@ class OllamaProxy:
             print(f"   - Results: {tps:.2f} tokens/s, Accuracy: {'✅ OK' if accuracy == 1.0 else '❌ FAILED'}")
             
             # Log this specific step to DB
-            self._log_to_db(model_id, stress_prompt, content, latency, in_tokens, out_tokens, tps, 
+            self._log_to_db(model_id, filler, content, latency, in_tokens, out_tokens, tps, 
                             json.dumps(messages), str(response), test_type="stress", accuracy_score=accuracy)
             
             results.append({
@@ -238,12 +263,8 @@ class OllamaProxy:
                 "accuracy": accuracy
             })
             
-            # Append long filler to the actual memory for next turn
-            messages.append({"role": "user", "content": "Tell me a long story about space to fill up my memory."})
-            messages.append({"role": "assistant", "content": content[:200] + "... (truncated history)"})
-            
             if accuracy == 0:
-                print(f"🛑 RECALL LOST at {in_tokens} tokens. Stopping test.")
+                print(f"🛑 RECALL LOST at {in_tokens} tokens. Final response: {content[:100]}...")
                 break
                 
         return results
@@ -352,9 +373,10 @@ if __name__ == "__main__":
                 sys.exit(1)
         
         steps = int(input("Number of steps (incremental context)? (default: 5): ") or 5)
-        inc = int(input("Tokens to add per step? (default: 1024): ") or 1024)
+        inc = int(input("Tokens to add per step? (default: 1024, try 50000 for high context): ") or 1024)
+        num_ctx = int(input("Config MAX Context (num_ctx)? (default: 8192, try 131072 for 128K): ") or 8192)
         
-        stress_results = PROXY.run_context_stress_test(model_name, steps=steps, increment_tokens=inc)
+        stress_results = PROXY.run_context_stress_test(model_name, steps=steps, increment_tokens=inc, num_ctx=num_ctx)
         print("\n--- STRESS TEST FINAL SUMMARY ---")
         for sr in stress_results:
             status = "✅ OK" if sr["accuracy"] == 1.0 else "❌ FAIL"
