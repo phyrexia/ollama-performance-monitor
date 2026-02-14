@@ -13,6 +13,24 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 
+def parse_int_input(val: str) -> int:
+    """Parses string inputs with K/M suffixes into integers."""
+    if not val:
+        return 0
+    val = val.upper().strip()
+    multiplier = 1
+    if val.endswith('K'):
+        multiplier = 1024
+        val = val[:-1]
+    elif val.endswith('M'):
+        multiplier = 1024 * 1024
+        val = val[:-1]
+    
+    try:
+        return int(float(val) * multiplier)
+    except ValueError:
+        return 0
+
 class OllamaProxy:
     def __init__(self, db_path: str = "ollama_performance.db"):
         self.client = ollama.Client()
@@ -319,8 +337,14 @@ class OllamaProxy:
 if __name__ == "__main__":
     PROXY = OllamaProxy()
     
-    # 1. Show local models
-    print("Available Local Models (Ollama):")
+    # 1. Mode Selection First
+    print("\n--- OLLAMA PERFORMANCE MONITOR ---")
+    print("1. Standard Benchmark (Speed / Latency)")
+    print("2. Context Stress Test (Needle in a Haystack)")
+    mode = input("Select mode (1/2, default: 1): ") or "1"
+
+    # 2. Show local models
+    print("\nAvailable Local Models (Ollama):")
     available = PROXY.list_local_models()
     if not available:
         print("❌ No models found in Ollama. Make sure Ollama is running.")
@@ -328,12 +352,6 @@ if __name__ == "__main__":
         
     for m in available:
         print(f" - {m}")
-
-    # 2. Mode Selection
-    print("\n--- TEST MODE ---")
-    print("1. Standard Benchmark (Speed / Latency)")
-    print("2. Context Stress Test (Needle in a Haystack)")
-    mode = input("Select mode (1/2, default: 1): ") or "1"
 
     if mode == "1":
         # Standard logic
@@ -372,9 +390,14 @@ if __name__ == "__main__":
                 print("❌ Invalid model.")
                 sys.exit(1)
         
-        steps = int(input("Number of steps (incremental context)? (default: 5): ") or 5)
-        inc = int(input("Tokens to add per step? (default: 1024, try 50000 for high context): ") or 1024)
-        num_ctx = int(input("Config MAX Context (num_ctx)? (default: 8192, try 131072 for 128K): ") or 8192)
+        steps_input = input("Number of steps (incremental context)? (default: 5): ")
+        steps = int(steps_input) if steps_input else 5
+        
+        inc_input = input("Tokens to add per step? (default: 1024, try 50K for high context): ")
+        inc = parse_int_input(inc_input) if inc_input else 1024
+        
+        ctx_input = input("Config MAX Context (num_ctx)? (default: 8192, try 128K): ")
+        num_ctx = parse_int_input(ctx_input) if ctx_input else 8192
         
         stress_results = PROXY.run_context_stress_test(model_name, steps=steps, increment_tokens=inc, num_ctx=num_ctx)
         print("\n--- STRESS TEST FINAL SUMMARY ---")
