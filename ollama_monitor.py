@@ -41,11 +41,21 @@ class OllamaProxy:
                     output_tokens INTEGER,
                     tokens_per_sec REAL,
                     request_json TEXT,
-                    response_json TEXT
+                    response_json TEXT,
+                    test_type TEXT DEFAULT 'standard',
+                    accuracy_score REAL DEFAULT 1.0
                 )
             ''')
+            # Migration check
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(ollama_logs)")
+            columns = [column[1] for column in cursor.fetchall()]
+            if "test_type" not in columns:
+                conn.execute("ALTER TABLE ollama_logs ADD COLUMN test_type TEXT DEFAULT 'standard'")
+            if "accuracy_score" not in columns:
+                conn.execute("ALTER TABLE ollama_logs ADD COLUMN accuracy_score REAL DEFAULT 1.0")
 
-    def query(self, model_id: str, prompt: str, log_to_db: bool = True):
+    def query(self, model_id: str, prompt: str, log_to_db: bool = True, test_type: str = "standard"):
         # Latency: Total Round Trip Time
         start_time = time.perf_counter()
         
@@ -84,7 +94,7 @@ class OllamaProxy:
         if log_to_db:
             self._log_to_db(
                 model_id, prompt, response['response'] if isinstance(response, dict) else response.response, 
-                latency, in_tokens, out_tokens, tps, req_json, resp_json
+                latency, in_tokens, out_tokens, tps, req_json, resp_json, test_type=test_type
             )
 
         resp_text = response['response'] if isinstance(response, dict) else response.response
@@ -123,7 +133,7 @@ class OllamaProxy:
 
     def run_benchmark(self, prompt: str, models: list):
         """Executes a benchmark over a list of models with warm-up and consistency check."""
-        print(f"\n📊 OLLAMA PERFORMANCE MONITOR - Prompt: '{prompt}'")
+        print(f"\n📊 OLLAMA PERFORMANCE MONITOR (Standard) - Prompt: '{prompt}'")
         results = {}
         for model_id in models:
             recent = self._check_recent_test(model_id, prompt)
@@ -149,12 +159,12 @@ class OllamaProxy:
                 
                 # 2. Measured Run 1
                 print(f"   - Phase 2: Measured run 1/2...")
-                res1 = self.query(model_id, prompt, log_to_db=True)
+                res1 = self.query(model_id, prompt, log_to_db=True, test_type="standard")
                 tps1 = float(res1["metrics"]["tps"].split()[0])
                 
                 # 3. Measured Run 2
                 print(f"   - Phase 3: Measured run 2/2...")
-                res2 = self.query(model_id, prompt, log_to_db=True)
+                res2 = self.query(model_id, prompt, log_to_db=True, test_type="standard")
                 tps2 = float(res2["metrics"]["tps"].split()[0])
                 
                 # Consistency Check
@@ -178,6 +188,64 @@ class OllamaProxy:
                 print(f"   ❌ Error benchmarking {model_id}: {e}")
                 results[model_id] = {"error": str(e)}
         
+        return results
+
+    def run_context_stress_test(self, model_id: str, steps: int = 5, increment_tokens: int = 512):
+        """Needle in a Haystack: Tests memory retention as context grows."""
+        print(f"\n🧠 CONTEXT STRESS TEST - Model: {model_id}")
+        secret_key = "DRAGON-AZUL-2026"
+        needle_context = f"NOTE: The secret vault key is {secret_key}. Do not forget it."
+        
+        messages = [{"role": "system", "content": "You are a helpful assistant. Remember the secret key provided."}]
+        messages.append({"role": "user", "content": f"Hi. {needle_context} Please confirm the key."})
+        
+        print(f"⌛ Phase 0: Initializing conversation with secret key...")
+        resp = self.client.chat(model=model_id, messages=messages)
+        messages.append({"role": "assistant", "content": resp.message.content})
+        
+        results = []
+        current_ctx_estimate = 0
+        
+        for i in range(1, steps + 1):
+            print(f"⌛ Step {i}/{steps}: Increasing context (+~{increment_tokens} tokens)...")
+            filler = "This is filler text to expand the context window. " * (increment_tokens // 10)
+            
+            # Stress run: Ask for the key inside a large filler block
+            stress_prompt = f"{filler}\n\nRECALL CHALLENGE: What was the secret vault key mentioned at the very beginning?"
+            
+            start_time = time.perf_counter()
+            response = self.client.chat(model=model_id, messages=messages + [{"role": "user", "content": stress_prompt}])
+            latency = time.perf_counter() - start_time
+            
+            content = response.message.content
+            accuracy = 1.0 if secret_key in content else 0.0
+            
+            in_tokens = response.get('prompt_eval_count', 0)
+            out_tokens = response.get('eval_count', 0)
+            tps = out_tokens / latency if latency > 0 else 0
+            
+            print(f"   - Current Context: ~{in_tokens} tokens")
+            print(f"   - Results: {tps:.2f} tokens/s, Accuracy: {'✅ OK' if accuracy == 1.0 else '❌ FAILED'}")
+            
+            # Log this specific step to DB
+            self._log_to_db(model_id, stress_prompt, content, latency, in_tokens, out_tokens, tps, 
+                            json.dumps(messages), str(response), test_type="stress", accuracy_score=accuracy)
+            
+            results.append({
+                "step": i,
+                "context_tokens": in_tokens,
+                "tps": tps,
+                "accuracy": accuracy
+            })
+            
+            # Append long filler to the actual memory for next turn
+            messages.append({"role": "user", "content": "Tell me a long story about space to fill up my memory."})
+            messages.append({"role": "assistant", "content": content[:200] + "... (truncated history)"})
+            
+            if accuracy == 0:
+                print(f"🛑 RECALL LOST at {in_tokens} tokens. Stopping test.")
+                break
+                
         return results
 
     def export_performance_charts(self, results: Dict[str, Any], filename: str = "performance_report.png"):
@@ -219,13 +287,13 @@ class OllamaProxy:
         print(f"\n✅ Visual report saved to: {save_path}")
         plt.close()
 
-    def _log_to_db(self, model, prompt, resp, latency, in_t, out_t, tps, req_json=None, resp_json=None):
+    def _log_to_db(self, model, prompt, resp, latency, in_t, out_t, tps, req_json=None, resp_json=None, test_type="standard", accuracy_score=1.0):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('''
                 INSERT INTO ollama_logs 
-                (timestamp, model_name, prompt, full_response, latency_seconds, input_tokens, output_tokens, tokens_per_sec, request_json, response_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (datetime.now().isoformat(), model, prompt, resp, latency, in_t, out_t, tps, req_json, resp_json))
+                (timestamp, model_name, prompt, full_response, latency_seconds, input_tokens, output_tokens, tokens_per_sec, request_json, response_json, test_type, accuracy_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (datetime.now().isoformat(), model, prompt, resp, latency, in_t, out_t, tps, req_json, resp_json, test_type, accuracy_score))
 
 if __name__ == "__main__":
     PROXY = OllamaProxy()
@@ -240,30 +308,54 @@ if __name__ == "__main__":
     for m in available:
         print(f" - {m}")
 
-    # 2. Benchmark Configuration
-    fixed_prompt = "Generate a short science fiction story of approximately 100 tokens."
-    print("\n--- BENCHMARK CONFIGURATION ---")
-    filter_kw = input("Enter a keyword to choose models (or press Enter for defaults): ").lower()
-    
-    if filter_kw:
-        models_to_test = [m for m in available if filter_kw in m.lower()]
-        if not models_to_test:
-            print(f"⚠️ No models found matching '{filter_kw}'.")
-            models_to_test = []
-    else:
-        # Defaults if no filter
-        models_to_test = available[:2] # Default to first 2 models
-    
-    if models_to_test:
-        print(f"Selected models: {models_to_test}")
-        results = PROXY.run_benchmark(fixed_prompt, models_to_test)
+    # 2. Mode Selection
+    print("\n--- TEST MODE ---")
+    print("1. Standard Benchmark (Speed / Latency)")
+    print("2. Context Stress Test (Needle in a Haystack)")
+    mode = input("Select mode (1/2, default: 1): ") or "1"
+
+    if mode == "1":
+        # Standard logic
+        fixed_prompt = "Generate a short science fiction story of approximately 100 tokens."
+        print("\n--- BENCHMARK CONFIGURATION ---")
+        filter_kw = input("Enter a keyword to choose models (or press Enter for defaults): ").lower()
         
-        print("\n--- FINAL RESULTS ---")
-        for mod, metrics in results.items():
-            print(f"Model: {mod} -> {metrics}")
+        if filter_kw:
+            models_to_test = [m for m in available if filter_kw in m.lower()]
+            if not models_to_test:
+                print(f"⚠️ No models found matching '{filter_kw}'.")
+                models_to_test = []
+        else:
+            models_to_test = available[:2]
+        
+        if models_to_test:
+            results = PROXY.run_benchmark(fixed_prompt, models_to_test)
+            print("\n--- FINAL RESULTS ---")
+            for mod, metrics in results.items():
+                print(f"Model: {mod} -> {metrics}")
             
-        ans = input("\n📊 Would you like to generate a visual performance report? (y/n): ").lower()
-        if ans == 'y':
-            PROXY.export_performance_charts(results)
+            ans = input("\n📊 Would you like to generate a visual performance report? (y/n): ").lower()
+            if ans == 'y':
+                PROXY.export_performance_charts(results)
     else:
-        print("\n❌ No models selected for benchmark.")
+        # Stress Test logic
+        print("\n--- STRESS TEST CONFIGURATION ---")
+        model_name = input(f"Enter model name to test (available: {available}): ")
+        if model_name not in available:
+            # Try fuzzy match
+            match = [m for m in available if model_name in m]
+            if match:
+                model_name = match[0]
+                print(f"Using fuzzy match: {model_name}")
+            else:
+                print("❌ Invalid model.")
+                sys.exit(1)
+        
+        steps = int(input("Number of steps (incremental context)? (default: 5): ") or 5)
+        inc = int(input("Tokens to add per step? (default: 1024): ") or 1024)
+        
+        stress_results = PROXY.run_context_stress_test(model_name, steps=steps, increment_tokens=inc)
+        print("\n--- STRESS TEST FINAL SUMMARY ---")
+        for sr in stress_results:
+            status = "✅ OK" if sr["accuracy"] == 1.0 else "❌ FAIL"
+            print(f"Step {sr['step']}: Context {sr['context_tokens']} tokens -> {sr['tps']:.2f} tps | {status}")

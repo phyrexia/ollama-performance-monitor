@@ -7,6 +7,7 @@ A standalone benchmarking tool for local LLMs running on Ollama. Track speed, la
 - **Local Model Discovery**: Automatically lists models currently available in your Ollama instance.
 - **Speed & Latency Tracking**: Measures Tokens Per Second (TPS) and total round trip time.
 - **Benchmark Stability**: Includes a 3-phase test (Warm-up + 2 Measured runs) with consistency check (<10% dispersion) to eliminate model loading noise.
+- **Context Stress Test (Needle in a Haystack)**: New mode to test model reliability and accuracy as the context window grows.
 - **SQLite Database**: Persists all benchmark results in `ollama_performance.db` for long-term tracking.
 - **Full JSON Logging**: Stores the complete request and response JSON for every inference.
 - **Visual Reports**: Generates professional PNG charts comparing local model performance.
