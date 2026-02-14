@@ -45,7 +45,7 @@ class OllamaProxy:
                 )
             ''')
 
-    def query(self, model_id: str, prompt: str):
+    def query(self, model_id: str, prompt: str, log_to_db: bool = True):
         # Latency: Total Round Trip Time
         start_time = time.perf_counter()
         
@@ -80,11 +80,12 @@ class OllamaProxy:
         except Exception:
             resp_json = str(response)
 
-        # Log to DB
-        self._log_to_db(
-            model_id, prompt, response['response'] if isinstance(response, dict) else response.response, 
-            latency, in_tokens, out_tokens, tps, req_json, resp_json
-        )
+        # Log to DB only if requested
+        if log_to_db:
+            self._log_to_db(
+                model_id, prompt, response['response'] if isinstance(response, dict) else response.response, 
+                latency, in_tokens, out_tokens, tps, req_json, resp_json
+            )
 
         resp_text = response['response'] if isinstance(response, dict) else response.response
         return {
@@ -121,7 +122,7 @@ class OllamaProxy:
             return cursor.fetchone()
 
     def run_benchmark(self, prompt: str, models: list):
-        """Executes a benchmark over a list of models."""
+        """Executes a benchmark over a list of models with warm-up and consistency check."""
         print(f"\n📊 OLLAMA PERFORMANCE MONITOR - Prompt: '{prompt}'")
         results = {}
         for model_id in models:
@@ -140,11 +141,41 @@ class OllamaProxy:
                     }
                     continue
 
-            print(f"⌛ Measuring speed on {model_id}...")
+            print(f"\n⌛ Model {model_id}:")
             try:
-                res = self.query(model_id, prompt)
-                results[model_id] = res["metrics"]
+                # 1. Warm-up (discard results, just load to memory)
+                print(f"   - Phase 1: Warming up (Cold run / Loading)...")
+                self.query(model_id, prompt, log_to_db=False)
+                
+                # 2. Measured Run 1
+                print(f"   - Phase 2: Measured run 1/2...")
+                res1 = self.query(model_id, prompt, log_to_db=True)
+                tps1 = float(res1["metrics"]["tps"].split()[0])
+                
+                # 3. Measured Run 2
+                print(f"   - Phase 3: Measured run 2/2...")
+                res2 = self.query(model_id, prompt, log_to_db=True)
+                tps2 = float(res2["metrics"]["tps"].split()[0])
+                
+                # Consistency Check
+                dispersion = abs(tps1 - tps2) / max(tps1, tps2) if max(tps1, tps2) > 0 else 0
+                avg_tps = (tps1 + tps2) / 2
+                avg_latency = (float(res1["metrics"]["latency"].rstrip('s')) + 
+                              float(res2["metrics"]["latency"].rstrip('s'))) / 2
+                
+                if dispersion > 0.10:
+                    print(f"   ⚠️ Warning: High dispersion detected ({dispersion:.1%}). Results might be unstable.")
+                else:
+                    print(f"   ✅ Consistency check passed (Dispersion: {dispersion:.1%}).")
+
+                results[model_id] = {
+                    "tps": f"{avg_tps:.2f} tokens/s",
+                    "latency": f"{avg_latency:.2f}s",
+                    "tokens": res2["metrics"]["tokens"],
+                    "dispersion": f"{dispersion:.1%}"
+                }
             except Exception as e:
+                print(f"   ❌ Error benchmarking {model_id}: {e}")
                 results[model_id] = {"error": str(e)}
         
         return results
