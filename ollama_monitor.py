@@ -74,15 +74,21 @@ class OllamaProxy:
 
         # Serialize payloads
         req_json = json.dumps(request_payload)
-        resp_json = json.dumps(response)
+        try:
+            # Handle Pydantic models in newer ollama versions
+            resp_json = json.dumps(response.model_dump() if hasattr(response, 'model_dump') else dict(response))
+        except Exception:
+            resp_json = str(response)
 
         # Log to DB
         self._log_to_db(
-            model_id, prompt, response['response'], latency, in_tokens, out_tokens, tps, req_json, resp_json
+            model_id, prompt, response['response'] if isinstance(response, dict) else response.response, 
+            latency, in_tokens, out_tokens, tps, req_json, resp_json
         )
 
+        resp_text = response['response'] if isinstance(response, dict) else response.response
         return {
-            "response": response['response'],
+            "response": resp_text,
             "metrics": {
                 "tps": f"{tps:.2f} tokens/s",
                 "latency": f"{latency:.2f}s",
@@ -94,7 +100,8 @@ class OllamaProxy:
         """Lists models currently installed in the local Ollama instance."""
         try:
             resp = self.client.list()
-            return [m['name'] for m in resp['models']]
+            # In ollama-python >= 0.3.0, models are objects with a .model attribute
+            return [m.model for m in resp.models]
         except Exception as e:
             print(f"❌ Error listing Ollama models: {e}")
             return []
@@ -128,7 +135,7 @@ class OllamaProxy:
                     print(f"⏭️  Skipping {model_id}...")
                     results[model_id] = {
                         "tps": f"{tps:.2f} tokens/s",
-                        "latency": f"{latency:.2f}s",
+                        "latency": f"{lat:.2f}s",
                         "info": "Historical (last 10 days)"
                     }
                     continue
