@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama Web Analytics</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #030712;
+            --accent: #8b5cf6;
+            --accent-glow: rgba(139, 92, 246, 0.3);
+            --glass: rgba(17, 24, 39, 0.7);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --text-main: #f9fafb;
+            --text-dim: #9ca3af;
+        }
+
+        * {
+            box-sizing: border-box;
+            transition: all 0.2s ease;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg);
+            background-image: radial-gradient(circle at 50% 10%, #1e1b4b 0%, var(--bg) 70%);
+            color: var(--text-main);
+            margin: 0;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar Glassmorphism */
+        sidebar {
+            width: 320px;
+            background: var(--glass);
+            backdrop-filter: blur(16px);
+            border-right: 1px solid var(--card-border);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            z-index: 10;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(to right, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo i {
+            font-style: normal;
+        }
+
+        /* Controls */
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        label {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        select,
+        input,
+        button {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 12px;
+            color: white;
+            font-family: inherit;
+            font-size: 0.95rem;
+            outline: none;
+        }
+
+        select:focus,
+        input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 12px;
+            border: none;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px var(--accent-glow);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Main Content Area */
+        main {
+            flex: 1;
+            padding: 32px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 24px;
+        }
+
+        .card {
+            background: var(--glass);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+        }
+
+        .card-header {
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* Console styling */
+        .console {
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 12px;
+            padding: 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid var(--card-border);
+            line-height: 1.5;
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+            border-left: 2px solid #4ade80;
+            padding-left: 8px;
+            opacity: 0;
+            animation: slideIn 0.3s forwards;
+        }
+
+        .log-entry.error {
+            border-color: #f43f5e;
+            color: #fda4af;
+        }
+
+        .log-entry.warning {
+            border-color: #f59e0b;
+            color: #fde68a;
+        }
+
+        .log-entry.header {
+            border-color: #8b5cf6;
+            font-weight: bold;
+            color: #c084fc;
+            font-size: 1rem;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(-10px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        .processing {
+            animation: pulse 1.5s infinite;
+            color: var(--accent);
+        }
+
+        /* Stats & Charts */
+        .stat-val {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .chart-container {
+            height: 350px;
+            width: 100%;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+
+<body>
+    <sidebar>
+        <div class="logo"><i>⚡</i> Ollama Lab</div>
+
+        <div class="control-group">
+            <label>Model selection</label>
+            <select id="model-select">
+                <option value="">Loading models...</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label>Test Mode</label>
+            <select id="test-mode">
+                <option value="standard">Standard Benchmark</option>
+                <option value="stress">Context Stress Test</option>
+                <option value="concurrency">Concurrency Load</option>
+            </select>
+        </div>
+
+        <div id="extra-params">
+            <!-- Dynamic params based on mode -->
+        </div>
+
+        <button class="btn-primary" id="start-btn">RUN EXPERIMENT</button>
+
+        <div id="progress-container" style="display: none; margin-top: 16px;">
+            <div style="display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 4px;">
+                <span id="current-phase" style="color: var(--accent); font-weight: 600;">Initialize</span>
+                <span id="progress-percent">0%</span>
+            </div>
+            <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
+                <div id="progress-bar"
+                    style="width: 0%; height: 100%; background: var(--accent); transition: width 0.5s ease;"></div>
+            </div>
+            <div id="running-status"
+                style="font-size: 0.7rem; color: var(--text-dim); margin-top: 4px; font-style: italic;">Running
+                experiment...</div>
+        </div>
+
+        <div style="flex: 1"></div>
+        <div class="card" style="padding: 12px; font-size: 0.8rem; border-color: #38bdf820; background: #38bdf805;">
+            <div style="color: #38bdf8; margin-bottom: 4px;">SYSTEM STATUS</div>
+            <div id="hw-live">CPU: --% | RAM: --% | GPU: --%</div>
+        </div>
+    </sidebar>
+
+    <main>
+        <div class="card" style="padding: 16px;">
+            <div class="card-header">
+                <label>Live Console</label>
+                <button style="padding: 4px 12px; font-size: 0.7rem;"
+                    onclick="document.getElementById('console').innerHTML=''">CLEAR</button>
+            </div>
+            <div id="console" class="console"></div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-header"><label>Performance Analytics</label></div>
+                <div id="mainChart" class="chart-container"></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><label>Hardware Intensity</label></div>
+                <div id="hwChart" class="chart-container"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header"><label>Historical Insights</label></div>
+            <div id="history-grid">
+                <!-- Data will be populated here -->
+                <table
+                    style="width: 100%; text-align: left; font-size: 0.9rem; border-spacing: 0 8px; border-collapse: separate;">
+                    <thead>
+                        <tr>
+                            <th style="color: var(--text-dim); font-weight: 400;">TIMESTAMP</th>
+                            <th style="color: var(--text-dim); font-weight: 400;">MODEL</th>
+                            <th style="color: var(--text-dim); font-weight: 400;">TPS</th>
+                            <th style="color: var(--text-dim); font-weight: 400;">LATENCY</th>
+                            <th style="color: var(--text-dim); font-weight: 400;">TYPE</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const socket = io();
+        const startBtn = document.getElementById('start-btn');
+        const consoleEl = document.getElementById('console');
+        const modeSelect = document.getElementById('test-mode');
+        const extraParams = document.getElementById('extra-params');
+
+        // --- UI Updates ---
+        function addLog(msg, type = 'info') {
+            const div = document.createElement('div');
+            div.className = `log-entry ${type}`;
+            div.innerText = msg;
+            consoleEl.appendChild(div);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        // --- Data Fetching ---
+        async function loadModels() {
+            const resp = await fetch('/api/models');
+            const data = await resp.json();
+            const select = document.getElementById('model-select');
+            select.innerHTML = '<option value="all">-- All Models --</option>' +
+                data.models.map(m => `<option value="${m}">${m}</option>`).join('');
+
+            // Add change listener for real-time filtering
+            select.addEventListener('change', () => {
+                loadHistory();
+            });
+        }
+
+        async function loadHistory() {
+            const selectedModel = document.getElementById('model-select').value;
+            const resp = await fetch(`/api/history?limit=30&model=${selectedModel}`);
+            const data = await resp.json();
+            const body = document.getElementById('history-body');
+
+            if (data.history.length === 0) {
+                body.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 20px; color: var(--text-dim);">No data found for this selection</td></tr>';
+                return;
+            }
+            body.innerHTML = data.history.map(h => `
+                <tr style="background: rgba(255,255,255,0.02);">
+                    <td style="padding: 12px; border-radius: 8px 0 0 8px;">${h.timestamp.split('T')[1].split('.')[0]}</td>
+                    <td>${h.model_name}</td>
+                    <td style="color: var(--accent); font-weight: 600;">${h.tokens_per_sec.toFixed(2)}</td>
+                    <td>${h.latency_seconds.toFixed(2)}s</td>
+                    <td style="border-radius: 0 8px 8px 0;"><span style="background: rgba(139, 92, 246, 0.1); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem;">${h.test_type}</span></td>
+                </tr>
+            `).join('');
+            updateCharts(data.history);
+        }
+
+        // --- Mode Switching ---
+        modeSelect.addEventListener('change', () => {
+            if (modeSelect.value === 'stress') {
+                extraParams.innerHTML = `
+                <div class="control-group">
+                        <label>Steps</label>
+                        <input type="number" id="steps" value="5">
+                    </div>
+                    <div class="control-group">
+                        <label>Increment (Tokens)</label>
+                        <input type="number" id="increment" value="1024">
+                    </div>
+                    <div class="control-group">
+                        <label>Max Context</label>
+                        <input type="number" id="num_ctx" value="4096">
+                    </div>
+            `;
+            } else if (modeSelect.value === 'concurrency') {
+                extraParams.innerHTML = `
+                <div class="control-group">
+                        <label>Parallel Users</label>
+                        <input type="number" id="users" value="3">
+                    </div>
+            `;
+            } else {
+                extraParams.innerHTML = '';
+            }
+        });
+
+        // --- Socket Events ---
+        startBtn.onclick = () => {
+            const model = document.getElementById('model-select').value;
+            const mode = modeSelect.value;
+            const data = { model, test_type: mode };
+
+            if (mode === 'stress') {
+                data.steps = parseInt(document.getElementById('steps').value);
+                data.increment = parseInt(document.getElementById('increment').value);
+                data.num_ctx = parseInt(document.getElementById('num_ctx').value);
+            } else if (mode === 'concurrency') {
+                data.users = parseInt(document.getElementById('users').value);
+            }
+
+            startBtn.disabled = true;
+            document.getElementById('progress-container').style.display = 'block';
+            document.getElementById('progress-bar').style.width = '0%';
+            document.getElementById('progress-percent').innerText = '0%';
+            addLog(`Initializing ${mode} test sequence...`, 'header');
+            socket.emit('start_benchmark', data);
+        };
+
+        socket.on('status_update', (data) => {
+            addLog(data.message, data.type);
+
+            const bar = document.getElementById('progress-bar');
+            const percentText = document.getElementById('progress-percent');
+            const phaseText = document.getElementById('current-phase');
+            const statusText = document.getElementById('running-status');
+
+            bar.classList.add('processing');
+            const msgLower = data.message.toLowerCase();
+
+            // Clean up the phase text
+            let displayPhase = data.message.split('...')[0].replace(/[⌛📊🚀🧠⌛⚠️✅⏭️]/g, '').trim();
+            if (displayPhase.length > 25) displayPhase = displayPhase.substring(0, 22) + '...';
+            phaseText.innerText = displayPhase;
+            statusText.innerText = "Processing task...";
+
+            // Default mapping
+            let progress = 10;
+            const phases = {
+                'warming up': 20,
+                'measured run 1': 45,
+                'measured run 2': 80,
+                'concurrency': 50
+            };
+
+            // Granular step detection (e.g. "Step 2/5")
+            const stepMatch = msgLower.match(/step (\d+)\/(\d+)/);
+            if (stepMatch) {
+                const current = parseInt(stepMatch[1]);
+                const total = parseInt(stepMatch[2]);
+                progress = 15 + Math.round((current / total) * 75);
+            } else {
+                for (const [key, val] of Object.entries(phases)) {
+                    if (msgLower.includes(key)) {
+                        progress = val;
+                        break;
+                    }
+                }
+            }
+
+            // Only update if it's an advancement
+            const currentWidth = parseInt(bar.style.width) || 0;
+            if (progress > currentWidth) {
+                bar.style.width = `${progress}% `;
+                percentText.innerText = `${progress}% `;
+            }
+        });
+
+        socket.on('hw_update', (data) => {
+            const hwEl = document.getElementById('hw-live');
+            hwEl.innerText = `CPU: ${data.cpu_percent}% | RAM: ${data.ram_percent}% | GPU: ${data.gpu_load.toFixed(0)}% `;
+        });
+
+        socket.on('benchmark_complete', (data) => {
+            addLog('BENCHMARK COMPLETE', 'header');
+            startBtn.disabled = false;
+            const bar = document.getElementById('progress-bar');
+            bar.classList.remove('processing');
+            document.getElementById('progress-container').style.display = 'none';
+            loadHistory();
+        });
+
+        socket.on('error', (data) => {
+            addLog(`Error: ${data.message} `, 'error');
+            startBtn.disabled = false;
+        });
+
+        // --- Visualization ---
+        function updateCharts(history) {
+            const selectedModel = document.getElementById('model-select').value;
+
+            let traces = [];
+            let hwTraces = [];
+
+            if (selectedModel === 'all') {
+                // Group by model for comparison
+                const models = [...new Set(history.map(h => h.model_name))];
+                models.forEach(model => {
+                    const modelData = history.filter(h => h.model_name === model);
+                    traces.push({
+                        x: modelData.map(h => h.timestamp),
+                        y: modelData.map(h => h.tokens_per_sec),
+                        name: model,
+                        type: 'scatter',
+                        mode: 'lines+markers'
+                    });
+
+                    hwTraces.push({
+                        x: modelData.map(h => h.timestamp),
+                        y: modelData.map(h => h.cpu_percent),
+                        name: `${model} CPU`,
+                        type: 'bar'
+                    });
+                });
+            } else {
+                // Single model view
+                traces.push({
+                    x: history.map(h => h.timestamp),
+                    y: history.map(h => h.tokens_per_sec),
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    line: { color: '#8b5cf6', width: 3 },
+                    marker: { size: 8, color: '#c084fc' },
+                    fill: 'tozeroy',
+                    fillcolor: 'rgba(139, 92, 246, 0.1)'
+                });
+
+                hwTraces.push({
+                    x: history.map(h => h.timestamp),
+                    y: history.map(h => h.cpu_percent),
+                    name: 'CPU Load %',
+                    type: 'bar',
+                    marker: { color: '#fb7185' }
+                });
+            }
+
+            const layoutOptions = {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#9ca3af', family: 'Outfit' },
+                margin: { t: 30, r: 10, l: 40, b: 40 },
+                xaxis: { gridcolor: '#1f2937' },
+                yaxis: { gridcolor: '#1f2937' },
+                legend: { orientation: 'h', y: -0.2 }
+            };
+
+            Plotly.newPlot('mainChart', traces, { ...layoutOptions, title: 'Throughput Trend' });
+            Plotly.newPlot('hwChart', hwTraces, { ...layoutOptions, title: 'Resource Intensity', barmode: 'group' });
+        }
+
+        // --- Init ---
+        loadModels();
+        loadHistory();
+    </script>
+</body>
+
+</html>

@@ -1,6 +1,10 @@
-ollama_performance.db
-performance_report.png
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+*$py.class
+venv/
 .env
+*.db
+*.log
+.DS_Store
+dashboard_template.html
+dashboard_preview.png

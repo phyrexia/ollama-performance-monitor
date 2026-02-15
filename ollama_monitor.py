@@ -117,6 +117,10 @@ class OllamaProxy:
                 if col not in columns:
                     conn.execute(f"ALTER TABLE ollama_logs ADD COLUMN {col} {col_def}")
 
+    def log_status(self, message, status_type="info"):
+        """Standardized logger for both CLI and Web UI."""
+        print(f"[{status_type.upper()}] {message}")
+
     def query(self, model_id: str, prompt: str, log_to_db: bool = True, test_type: str = "standard"):
         # Latency: Total Round Trip Time
         start_time = time.perf_counter()
@@ -196,37 +200,28 @@ class OllamaProxy:
 
     def run_benchmark(self, prompt: str, models: list):
         """Executes a benchmark over a list of models with warm-up and consistency check."""
-        print(f"\n📊 OLLAMA PERFORMANCE MONITOR (Standard) - Prompt: '{prompt}'")
+        self.log_status(f"OLLAMA PERFORMANCE MONITOR (Standard) - Prompt: '{prompt[:50]}...'", "header")
         results = {}
         for model_id in models:
             recent = self._check_recent_test(model_id, prompt)
             if recent:
                 timestamp, lat, tps = recent
-                print(f"\n⚠️ Model {model_id} was already tested on {timestamp}")
-                print(f"   (Previous results: {tps:.2f} tokens/s, Latency: {lat:.2f}s)")
-                option = input(f"   Do you want to repeat the test for {model_id}? (y/n): ").lower()
-                if option != 'y':
-                    print(f"⏭️  Skipping {model_id}...")
-                    results[model_id] = {
-                        "tps": f"{tps:.2f} tokens/s",
-                        "latency": f"{lat:.2f}s",
-                        "info": "Historical (last 10 days)"
-                    }
-                    continue
-
-            print(f"\n⌛ Model {model_id}:")
+                self.log_status(f"Model {model_id} was already tested on {timestamp}", "warning")
+                self.log_status(f"   (Previous results: {tps:.2f} tokens/s, Latency: {lat:.2f}s)", "warning")
+            
+            self.log_status(f"Model {model_id}:", "info")
             try:
                 # 1. Warm-up (discard results, just load to memory)
-                print(f"   - Phase 1: Warming up (Cold run / Loading)...")
+                self.log_status(f"   - Phase 1: Warming up (Cold run / Loading)...", "progress")
                 self.query(model_id, prompt, log_to_db=False)
                 
                 # 2. Measured Run 1
-                print(f"   - Phase 2: Measured run 1/2...")
+                self.log_status(f"   - Phase 2: Measured run 1/2...", "progress")
                 res1 = self.query(model_id, prompt, log_to_db=True, test_type="standard")
                 tps1 = float(res1["metrics"]["tps"].split()[0])
                 
                 # 3. Measured Run 2
-                print(f"   - Phase 3: Measured run 2/2...")
+                self.log_status(f"   - Phase 3: Measured run 2/2...", "progress")
                 res2 = self.query(model_id, prompt, log_to_db=True, test_type="standard")
                 tps2 = float(res2["metrics"]["tps"].split()[0])
                 
@@ -237,9 +232,9 @@ class OllamaProxy:
                               float(res2["metrics"]["latency"].rstrip('s'))) / 2
                 
                 if dispersion > 0.10:
-                    print(f"   ⚠️ Warning: High dispersion detected ({dispersion:.1%}). Results might be unstable.")
+                    self.log_status(f"   ⚠️ Warning: High dispersion detected ({dispersion:.1%}). Results might be unstable.", "warning")
                 else:
-                    print(f"   ✅ Consistency check passed (Dispersion: {dispersion:.1%}).")
+                    self.log_status(f"   ✅ Consistency check passed (Dispersion: {dispersion:.1%}).", "info")
 
                 results[model_id] = {
                     "tps": f"{avg_tps:.2f} tokens/s",
@@ -248,14 +243,14 @@ class OllamaProxy:
                     "dispersion": f"{dispersion:.1%}"
                 }
             except Exception as e:
-                print(f"   ❌ Error benchmarking {model_id}: {e}")
+                self.log_status(f"   ❌ Error benchmarking {model_id}: {e}", "error")
                 results[model_id] = {"error": str(e)}
         
         return results
 
     def run_concurrency_test(self, model_id: str, users: int = 5, prompt: str = "Explain the importance of local LLMs."):
         """Simulates parallel users making requests to measure throughput degradation."""
-        print(f"\n🚀 CONCURRENCY LOAD TEST - Model: {model_id} | Users: {users}")
+        self.log_status(f"CONCURRENCY LOAD TEST - Model: {model_id} | Users: {users}", "header")
         
         from concurrent.futures import ThreadPoolExecutor
         
@@ -304,7 +299,7 @@ class OllamaProxy:
 
     def run_context_stress_test(self, model_id: str, steps: int = 5, increment_tokens: int = 512, num_ctx: int = 4096):
         """Needle in a Haystack: Tests memory retention as context grows."""
-        print(f"\n🧠 CONTEXT STRESS TEST - Model: {model_id} (num_ctx: {num_ctx})")
+        self.log_status(f"CONTEXT STRESS TEST - Model: {model_id} (num_ctx: {num_ctx})", "header")
         secret_key = "DRAGON-AZUL-2026"
         needle_context = f"NOTE: The secret vault key is {secret_key}. Do not forget it."
         
@@ -314,7 +309,7 @@ class OllamaProxy:
         messages = [{"role": "system", "content": "You are a helpful assistant. Remember the secret key provided."}]
         messages.append({"role": "user", "content": f"Hi. {needle_context} Please confirm the key."})
         
-        print(f"⌛ Phase 0: Initializing conversation with secret key...")
+        self.log_status(f"Phase 0: Initializing conversation with secret key...", "progress")
         resp = self.client.chat(model=model_id, messages=messages, options=options)
         messages.append({"role": "assistant", "content": resp.message.content})
         
@@ -327,7 +322,7 @@ class OllamaProxy:
                        "Ollama makes it easy to run LLMs locally on your machine. ")
 
         for i in range(1, steps + 1):
-            print(f"⌛ Step {i}/{steps}: Increasing context (+~{increment_tokens} tokens)...")
+            self.log_status(f"Step {i}/{steps}: Increasing context (+~{increment_tokens} tokens)...", "progress")
             
             # Efficiently build large volume of filler
             num_blocks = max(1, increment_tokens // 1000)
@@ -348,12 +343,20 @@ class OllamaProxy:
                 # Add a placeholder assistant response to keep the turn order
                 messages.append({"role": "assistant", "content": "Acknowledged. Segment processed."})
             except Exception as e:
-                print(f"   ❌ API Error at Step {i} (Likely OOM): {e}")
+                self.log_status(f"   ❌ API Error at Step {i} (Likely OOM): {e}", "error")
                 break
 
             latency = time.perf_counter() - start_time
             
             content = response.message.content
+            accuracy = 1.0 if secret_key.lower() in content.lower() else 0.0
+            
+            in_tokens = response.get('prompt_eval_count', 0)
+            out_tokens = response.get('eval_count', 0)
+            tps = out_tokens / latency if latency > 0 else 0
+            
+            self.log_status(f"   - Current Context: ~{in_tokens} tokens", "info")
+            self.log_status(f"   - Results: {tps:.2f} tokens/s, Accuracy: {'✅ OK' if accuracy == 1.0 else '❌ FAILED'}", "info")
             # Improved accuracy check (case insensitive)
             accuracy = 1.0 if secret_key.lower() in content.lower() else 0.0
             

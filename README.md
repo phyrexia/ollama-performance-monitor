@@ -1,25 +1,22 @@
-# Ollama Performance Monitor 🦙
+# Ollama Lab (Performance Monitor) 🦙⚡
 
-A standalone benchmarking tool for local LLMs running on Ollama. Track speed, latency, and resource usage for your local models with ease.
+A premium, standalone benchmarking tool for local LLMs running on Ollama. Track speed, latency, and resource usage with a high-end Web Dashboard.
 
 ## Features ✨
 
-- **Local Model Discovery**: Automatically lists models currently available in your Ollama instance.
-- **Speed & Latency Tracking**: Measures Tokens Per Second (TPS) and total round trip time.
-- **Hardware Telemetry**: Tracks CPU, RAM, and GPU usage (VRAM, Load, Temp) during benchmarks.
-- **Concurrency Load Test**: Simulate parallel users to test Ollama under pressure.
-- **Interactive HTML Dashboard**: Plotly-powered dashboard for deeper evaluation.
-- **Context Stress Test (Needle in a Haystack)**: Grow context window up to 128K+ and test memory recall.
-- **SQLite Database**: Persists all benchmark results in `ollama_performance.db` for long-term tracking.
-- **Full JSON Logging**: Stores the complete request and response JSON for every inference.
-- **Visual Reports**: Generates professional PNG charts comparing local model performance.
-- **Smart Caching**: Identifies duplicate tests and asks before re-running to save resources.
+- **Ollama Lab Web UI**: Premium glassmorphic dashboard (Dark Mode) for real-time monitoring.
+- **Real-time Status**: Pulse-animated progress bars and live console logs via WebSockets.
+- **Hardware Telemetry**: Live CPU, RAM, and GPU tracking during inference.
+- **Advanced Filtering**: Filter historical data by specific models or compare them all at once.
+- **Speed & Latency Analytics**: Measures Tokens Per Second (TPS) and consistency across runs.
+- **Stress Testing**: Needle in a Haystack (up to 128K context) and Concurrency Load tests.
+- **SQLite Persistence**: All results stored in `ollama_performance.db` for long-term analytics.
 
 ## Installation 🛠️
 
 1. **Prerequisites**:
-   - Install [Ollama](https://ollama.com/) and have it running.
-   - Pull some models (e.g., `ollama pull gemma3`).
+   - [Ollama](https://ollama.com/) running.
+   - [Python 3.10+](https://www.python.org/).
 
 2. **Clone and Setup**:
    ```bash
@@ -27,27 +24,32 @@ A standalone benchmarking tool for local LLMs running on Ollama. Track speed, la
    cd ollama-performance-monitor
    ```
 
-3. **Install Python dependencies**:
+3. **Install Dependencies**:
    ```bash
-   pip install ollama matplotlib numpy
+   pip install flask flask-socketio flask-cors eventlet ollama psutil
    ```
 
 ## Usage 🚀
 
-Start the monitor:
+### 🌐 Web Mode (Recommended)
+Launch the premium dashboard:
+```bash
+python app.py
+```
+And open **[http://localhost:5050](http://localhost:5050)** in your browser.
+
+### 💻 CLI Mode
+Run benchmarks directly from the terminal:
 ```bash
 python ollama_monitor.py
 ```
 
-### Options:
-- **Filtering**: Enter keywords to select specific models to benchmark.
-- **Visualization**: Generate a `performance_report.png` after the benchmark run.
-
 ## Project Structure 📁
 
-- `ollama_monitor.py`: Core benchmarking and visualization logic.
-- `ollama_performance.db`: Local SQLite database for results (git-ignored).
-- `.gitignore`: Keeps your local environment clean and secure.
+- `app.py`: Flask + Socket.IO backend for the Web UI.
+- `ollama_monitor.py`: Core benchmarking engine and hardware telemetry.
+- `templates/index.html`: Premium dashboard frontend.
+- `ollama_performance.db`: Local SQLite database (git-ignored).
 
 ## License 📄
 MIT License
