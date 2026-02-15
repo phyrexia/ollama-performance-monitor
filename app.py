@@ -1,7 +1,12 @@
+import os
+import sys
+
+# macOS eventlet compatibility fix: force 'poll' hub
+if sys.platform == 'darwin':
+    os.environ['EVENTLET_HUB'] = 'poll'
+
 import eventlet
 eventlet.monkey_patch()
-
-import os
 import sqlite3
 import json
 import threading
@@ -66,6 +71,30 @@ def get_history():
             cursor = conn.execute(query, params)
             logs = [dict(row) for row in cursor.fetchall()]
         return jsonify({"history": logs})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/log/<int:log_id>')
+def get_log_detail(log_id):
+    db_path = proxy.db_path
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM ollama_logs WHERE id = ?", (log_id,))
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({"error": "Log not found"}), 404
+            
+            # Parse JSON strings if they are valid
+            log_data = dict(row)
+            for key in ['request_json', 'response_json']:
+                if log_data.get(key):
+                    try:
+                        log_data[key] = json.loads(log_data[key])
+                    except:
+                        pass
+            
+        return jsonify(log_data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

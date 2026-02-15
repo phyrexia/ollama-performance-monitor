@@ -1,0 +1,10 @@
+flask
+flask-cors
+flask-socketio
+eventlet
+ollama
+matplotlib
+numpy
+psutil
+gputil
+jinja2
