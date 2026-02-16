@@ -45,10 +45,17 @@ python app.py
 And open **[http://localhost:5050](http://localhost:5050)** in your browser.
 
 ### 🕵️‍♂️ Proxy Monitoring
-Monitor any application by pointing its Ollama base URL to the proxy:
+Monitor any external application (e.g., Open WebUI, custom scripts) by pointing its Ollama base URL to the proxy monitor:
+
+1. **Proxy URL**: `http://localhost:5050/proxy`
+2. **Toggle**: Use the **Proxy Monitor** switch in the sidebar to enable/disable interception.
+3. **Logging**: When enabled, all `/api/generate` and `/api/chat` requests are logged with metrics (TPS, latency, etc.) and full JSON snapshots, even for **streaming** responses.
+
+**Example Usage**:
 ```bash
-# Example: Use the proxy for a generation request
-curl http://localhost:5050/proxy/api/generate -d '{"model": "llama3.2:1b", "prompt": "hi"}'
+# Point any script to the proxy
+curl http://localhost:5050/proxy/api/generate \
+  -d '{"model": "llama3.2:1b", "prompt": "hi", "stream": true}'
 ```
 
 ### 💻 CLI Mode

@@ -163,6 +163,72 @@
         }
 
         /* Modal styling */
+        /* Modal styling */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 40px;
+            height: 20px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #374151;
+            transition: .4s;
+            border-radius: 20px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 14px;
+            width: 14px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked+.slider {
+            background-color: var(--accent);
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(20px);
+        }
+
+        .proxy-card {
+            background: rgba(139, 92, 246, 0.05);
+            border: 1px solid rgba(139, 92, 246, 0.2);
+            border-radius: 12px;
+            padding: 16px;
+            margin-top: 8px;
+        }
+
+        .proxy-url {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--accent);
+            word-break: break-all;
+            margin-top: 8px;
+            padding: 4px 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
         .modal-overlay {
             display: none;
             position: fixed;
@@ -370,6 +436,19 @@
             <div id="running-status"
                 style="font-size: 0.7rem; color: var(--text-dim); margin-top: 4px; font-style: italic;">Running
                 experiment...</div>
+        </div>
+
+        <div class="proxy-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <label style="margin: 0;">Proxy Monitor</label>
+                <label class="switch">
+                    <input type="checkbox" id="proxy-toggle" checked>
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div id="proxy-addr" class="proxy-url" onclick="copyToClipboard(this.innerText)">Loading...</div>
+            <div style="font-size: 0.65rem; color: var(--text-dim); margin-top: 4px;">Point Ollama clients to this URL
+                to log metrics.</div>
         </div>
 
         <div style="flex: 1"></div>
@@ -715,9 +794,45 @@
             }
         }
 
+        // --- Proxy Toggle ---
+        const proxyToggle = document.getElementById('proxy-toggle');
+        const proxyAddr = document.getElementById('proxy-addr');
+
+        async function updateProxyStatus() {
+            const resp = await fetch('/api/proxy/status');
+            const data = await resp.json();
+            proxyToggle.checked = data.active;
+            proxyAddr.innerText = data.url;
+            
+            // Visual indicator
+            if (data.active) {
+                proxyAddr.style.boxShadow = "0 0 10px var(--accent-glow)";
+                proxyAddr.style.borderColor = "var(--accent)";
+            } else {
+                proxyAddr.style.boxShadow = "none";
+                proxyAddr.style.borderColor = "transparent";
+            }
+        }
+
+        proxyToggle.onchange = async () => {
+            const resp = await fetch('/api/proxy/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ active: proxyToggle.checked })
+            });
+            const data = await resp.json();
+            updateProxyStatus();
+        };
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text);
+            addLog(`Copied proxy address: ${text}`, 'info');
+        }
+
         // --- Init ---
         loadModels();
         loadHistory();
+        updateProxyStatus();
     </script>
 </body>
 

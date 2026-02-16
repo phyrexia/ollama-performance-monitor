@@ -31,6 +31,7 @@ class WebOllamaProxy(OllamaProxy):
         socketio.emit('status_update', {'message': message, 'type': status_type})
 
 proxy = WebOllamaProxy()
+proxy_active = True  # Global toggle for the proxy listener
 
 def background_hw_monitor():
     """Periodically emits hardware stats to the UI."""
@@ -140,58 +141,101 @@ def run_benchmark_task(data):
         proxy.log_status(f"Benchmark Task Error: {e}", "error")
         socketio.emit('error', {'message': str(e)})
 
+@app.route('/api/proxy/status', methods=['GET'])
+def get_proxy_status():
+    return jsonify({"active": proxy_active, "url": f"http://{request.host}/proxy"})
+
+@app.route('/api/proxy/toggle', methods=['POST'])
+def toggle_proxy():
+    global proxy_active
+    data = request.get_json()
+    proxy_active = data.get('active', not proxy_active)
+    status = "enabled" if proxy_active else "disabled"
+    proxy.log_status(f"Proxy monitoring {status}", "info")
+    return jsonify({"active": proxy_active})
+
 @app.route('/proxy/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def ollama_proxy(path):
     """Intercepts and logs requests to Ollama."""
+    if not proxy_active:
+        return jsonify({"error": "Ollama Analytics Proxy is disabled"}), 503
+
     ollama_url = f"http://localhost:11434/{path}"
     method = request.method
     data = request.get_data()
-    headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+    headers = {k: v for k, v in request.headers.items() if k.lower() != 'host'}
 
     start_time = time.perf_counter()
     try:
         # Forward request to local Ollama
         resp = requests.request(method, ollama_url, data=data, headers=headers, stream=True)
         
-        # If it's a generation request, we try to log the metrics
         is_generation = 'api/generate' in path or 'api/chat' in path
-        
         if not is_generation:
             return (resp.content, resp.status_code, resp.headers.items())
 
-        # For generation, we might want to capture the full response if it's not too large
-        # or just log that a request happened. For now, let's capture non-streaming ones.
-        is_stream = json.loads(data).get('stream', True) if data else True
+        req_json = {}
+        try:
+            req_json = json.loads(data) if data else {}
+        except: pass
         
-        if is_stream:
-            # Handle streaming: we can't easily capture the full response without blocking
-            # but we can log that it started.
-            proxy.log_status(f"Proxy: Streaming {path} request intercepted", "info")
-            return (resp.content, resp.status_code, resp.headers.items())
-        
-        # Non-streaming: capture everything
-        latency = time.perf_counter() - start_time
-        resp_json = resp.json()
-        
-        # Calculate tokens if available
-        in_tokens = resp_json.get('prompt_eval_count', 0)
-        out_tokens = resp_json.get('eval_count', 0)
-        tps = out_tokens / latency if latency > 0 else 0
-        
-        # Log to DB
-        hw = proxy._get_hardware_info()
-        model = resp_json.get('model', 'unknown')
-        prompt = "Proxied Request" # Could extract from JSON if needed
-        
-        proxy._log_to_db(
-            model, prompt, resp_json.get('response', resp_json.get('message', {}).get('content', '')),
-            latency, in_tokens, out_tokens, tps,
-            data.decode('utf-8'), json.dumps(resp_json),
-            test_type="proxy", hw_info=hw
-        )
-        
-        proxy.log_status(f"Proxy: Logged {model} request ({tps:.2f} tps)", "success")
-        return jsonify(resp_json)
+        is_stream = req_json.get('stream', True)
+        model = req_json.get('model', 'unknown')
+
+        if not is_stream:
+            # Non-streaming: capture everything
+            latency = time.perf_counter() - start_time
+            resp_json = resp.json()
+            in_tokens = resp_json.get('prompt_eval_count', 0)
+            out_tokens = resp_json.get('eval_count', 0)
+            tps = out_tokens / latency if latency > 0 else 0
+            
+            hw = proxy._get_hardware_info()
+            proxy._log_to_db(
+                model, "Proxied Request", resp_json.get('response', resp_json.get('message', {}).get('content', '')),
+                latency, in_tokens, out_tokens, tps,
+                data.decode('utf-8'), json.dumps(resp_json),
+                test_type="proxy", hw_info=hw
+            )
+            proxy.log_status(f"Proxy: Logged {model} request ({tps:.2f} tps)", "success")
+            return jsonify(resp_json)
+
+        # Streaming support
+        def generate():
+            full_response = ""
+            resp_metrics = {}
+            
+            for line in resp.iter_lines():
+                if line:
+                    yield line + b'\n'
+                    try:
+                        chunk = json.loads(line)
+                        if 'response' in chunk:
+                            full_response += chunk['response']
+                        elif 'message' in chunk and 'content' in chunk['message']:
+                            full_response += chunk['message']['content']
+                        
+                        if chunk.get('done'):
+                            resp_metrics = chunk
+                    except:
+                        pass
+            
+            # Post-stream logging
+            latency = time.perf_counter() - start_time
+            in_tokens = resp_metrics.get('prompt_eval_count', 0)
+            out_tokens = resp_metrics.get('eval_count', 0)
+            tps = out_tokens / latency if latency > 0 else 0
+            
+            hw = proxy._get_hardware_info()
+            proxy._log_to_db(
+                model, "Proxied Stream", full_response,
+                latency, in_tokens, out_tokens, tps,
+                data.decode('utf-8'), "Stream captured",
+                test_type="proxy", hw_info=hw
+            )
+            proxy.log_status(f"Proxy: Logged {model} stream ({tps:.2f} tps)", "success")
+
+        return app.response_class(generate(), content_type=resp.headers.get('Content-Type'))
 
     except Exception as e:
         proxy.log_status(f"Proxy Error: {e}", "error")
