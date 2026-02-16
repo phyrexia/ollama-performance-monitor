@@ -8,3 +8,4 @@ numpy
 psutil
 gputil
 jinja2
+requests

@@ -10,6 +10,9 @@ eventlet.monkey_patch()
 import sqlite3
 import json
 import threading
+import requests
+import time
+from datetime import datetime
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -134,8 +137,65 @@ def run_benchmark_task(data):
             socketio.emit('benchmark_complete', {'results': results, 'test_type': 'concurrency'})
             
     except Exception as e:
-        print(f"Benchmark Task Error: {e}")
+        proxy.log_status(f"Benchmark Task Error: {e}", "error")
         socketio.emit('error', {'message': str(e)})
+
+@app.route('/proxy/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def ollama_proxy(path):
+    """Intercepts and logs requests to Ollama."""
+    ollama_url = f"http://localhost:11434/{path}"
+    method = request.method
+    data = request.get_data()
+    headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+
+    start_time = time.perf_counter()
+    try:
+        # Forward request to local Ollama
+        resp = requests.request(method, ollama_url, data=data, headers=headers, stream=True)
+        
+        # If it's a generation request, we try to log the metrics
+        is_generation = 'api/generate' in path or 'api/chat' in path
+        
+        if not is_generation:
+            return (resp.content, resp.status_code, resp.headers.items())
+
+        # For generation, we might want to capture the full response if it's not too large
+        # or just log that a request happened. For now, let's capture non-streaming ones.
+        is_stream = json.loads(data).get('stream', True) if data else True
+        
+        if is_stream:
+            # Handle streaming: we can't easily capture the full response without blocking
+            # but we can log that it started.
+            proxy.log_status(f"Proxy: Streaming {path} request intercepted", "info")
+            return (resp.content, resp.status_code, resp.headers.items())
+        
+        # Non-streaming: capture everything
+        latency = time.perf_counter() - start_time
+        resp_json = resp.json()
+        
+        # Calculate tokens if available
+        in_tokens = resp_json.get('prompt_eval_count', 0)
+        out_tokens = resp_json.get('eval_count', 0)
+        tps = out_tokens / latency if latency > 0 else 0
+        
+        # Log to DB
+        hw = proxy._get_hardware_info()
+        model = resp_json.get('model', 'unknown')
+        prompt = "Proxied Request" # Could extract from JSON if needed
+        
+        proxy._log_to_db(
+            model, prompt, resp_json.get('response', resp_json.get('message', {}).get('content', '')),
+            latency, in_tokens, out_tokens, tps,
+            data.decode('utf-8'), json.dumps(resp_json),
+            test_type="proxy", hw_info=hw
+        )
+        
+        proxy.log_status(f"Proxy: Logged {model} request ({tps:.2f} tps)", "success")
+        return jsonify(resp_json)
+
+    except Exception as e:
+        proxy.log_status(f"Proxy Error: {e}", "error")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     # Ensure templates folder exists

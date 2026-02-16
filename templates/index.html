@@ -162,6 +162,88 @@
             line-height: 1.5;
         }
 
+        /* Modal styling */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(12px);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+
+        .modal {
+            background: var(--glass);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            width: 100%;
+            max-width: 1000px;
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 0 100px rgba(0, 0, 0, 0.5);
+            animation: modalPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        @keyframes modalPop {
+            from {
+                transform: scale(0.9);
+                opacity: 0;
+            }
+
+            to {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+
+        .modal-header {
+            padding: 24px 32px;
+            border-bottom: 1px solid var(--card-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-body {
+            padding: 32px;
+            overflow-y: auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        .json-viewer {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            white-space: pre-wrap;
+            overflow-x: auto;
+            max-height: 450px;
+            line-height: 1.4;
+            color: #d1d5db;
+        }
+
+        .clickable-row {
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .clickable-row:hover {
+            background: rgba(139, 92, 246, 0.1) !important;
+        }
+
         .log-entry {
             margin-bottom: 4px;
             border-left: 2px solid #4ade80;
@@ -339,6 +421,34 @@
         </div>
     </main>
 
+    <div id="log-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modal-title" style="margin: 0; font-weight: 600;">Log Details</h3>
+                <button onclick="closeModal()"
+                    style="background: rgba(255,255,255,0.1); border: none; color: white; cursor: pointer; font-size: 1.2rem; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="control-group">
+                    <label>REQUEST JSON</label>
+                    <div id="request-json" class="json-viewer"></div>
+                </div>
+                <div class="control-group">
+                    <label>RESPONSE JSON</label>
+                    <div id="response-json" class="json-viewer"></div>
+                </div>
+                <div style="grid-column: span 2">
+                    <label>PROMPT</label>
+                    <div id="prompt-content" class="json-viewer" style="margin-top: 8px;"></div>
+                </div>
+                <div style="grid-column: span 2">
+                    <label>FULL RESPONSE</label>
+                    <div id="response-content" class="json-viewer" style="margin-top: 8px;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         const socket = io();
         const startBtn = document.getElementById('start-btn');
@@ -380,11 +490,11 @@
                 return;
             }
             body.innerHTML = data.history.map(h => `
-                <tr style="background: rgba(255,255,255,0.02);">
+                <tr class="clickable-row" onclick="showLogDetail(${h.id})" style="background: rgba(255,255,255,0.02);">
                     <td style="padding: 12px; border-radius: 8px 0 0 8px;">${h.timestamp.split('T')[1].split('.')[0]}</td>
                     <td>${h.model_name}</td>
-                    <td style="color: var(--accent); font-weight: 600;">${h.tokens_per_sec.toFixed(2)}</td>
-                    <td>${h.latency_seconds.toFixed(2)}s</td>
+                    <td style="color: var(--accent); font-weight: 600;">${h.tokens_per_sec ? h.tokens_per_sec.toFixed(2) : 'N/A'}</td>
+                    <td>${h.latency_seconds ? h.latency_seconds.toFixed(2) + 's' : 'N/A'}</td>
                     <td style="border-radius: 0 8px 8px 0;"><span style="background: rgba(139, 92, 246, 0.1); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem;">${h.test_type}</span></td>
                 </tr>
             `).join('');
@@ -571,6 +681,38 @@
 
             Plotly.newPlot('mainChart', traces, { ...layoutOptions, title: 'Throughput Trend' });
             Plotly.newPlot('hwChart', hwTraces, { ...layoutOptions, title: 'Resource Intensity', barmode: 'group' });
+        }
+
+        // --- Modal Logic ---
+        async function showLogDetail(id) {
+            const modal = document.getElementById('log-modal');
+            const resp = await fetch(`/api/log/${id}`);
+            const log = await resp.json();
+
+            if (log.error) {
+                alert('Error loading log: ' + log.error);
+                return;
+            }
+
+            document.getElementById('modal-title').innerText = `Log Details #${id} - ${log.model_name}`;
+            document.getElementById('request-json').innerText = JSON.stringify(log.request_json, null, 2);
+            document.getElementById('response-json').innerText = JSON.stringify(log.response_json, null, 2);
+            document.getElementById('prompt-content').innerText = log.prompt;
+            document.getElementById('response-content').innerText = log.full_response;
+
+            modal.style.display = 'flex';
+        }
+
+        function closeModal() {
+            document.getElementById('log-modal').style.display = 'none';
+        }
+
+        // Close modal on outside click
+        window.onclick = function(event) {
+            const modal = document.getElementById('log-modal');
+            if (event.target == modal) {
+                closeModal();
+            }
         }
 
         // --- Init ---
